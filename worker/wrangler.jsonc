@@ -3,14 +3,19 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
   "compatibility_flags": ["nodejs_compat"],
-  "browser": {
-    "binding": "MYBROWSER"
-  },
+  "containers": [
+    {
+      "class_name": "LoginBrowserContainer",
+      "image": "./Dockerfile",
+      "max_instances": 5,
+      "instance_type": "standard-2"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
         "name": "LOGIN_SESSIONS",
-        "class_name": "LoginBrowserDO"
+        "class_name": "LoginBrowserContainer"
       }
     ]
   },
@@ -18,6 +23,15 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["LoginBrowserDO"]
+    },
+    {
+      "tag": "v2",
+      "renamed_classes": [
+        {
+          "from": "LoginBrowserDO",
+          "to": "LoginBrowserContainer"
+        }
+      ]
     }
   ]
 }

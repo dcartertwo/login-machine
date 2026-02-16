@@ -1,22 +1,23 @@
 /**
- * Login Machine Browser Worker — routes HTTP requests to LoginBrowserDO.
+ * Login Machine Browser Worker — routes HTTP requests to a Container
+ * running headless Chromium with Playwright.
  *
  * API surface:
- *   POST /sessions              → Create DO, launch browser, navigate
- *   POST /sessions/:id/:action  → Route action to existing DO
+ *   POST /sessions              → Start container, launch browser, navigate
+ *   POST /sessions/:id/:action  → Forward action to container
  *   DELETE /sessions/:id        → Close browser session
  *   GET  /health                → Worker health check
  *
  * All requests (except /health) require Bearer token auth.
  */
 
-import { validateAuth } from "./auth";
+import { getContainer, type Container } from "@cloudflare/containers";
+import { validateAuth } from "./auth.js";
 
-export { LoginBrowserDO } from "./login-browser-do";
+export { LoginBrowserContainer } from "./login-browser-container.js";
 
 export interface Env {
-  MYBROWSER: Fetcher;
-  LOGIN_SESSIONS: DurableObjectNamespace;
+  LOGIN_SESSIONS: DurableObjectNamespace<Container>;
   AUTH_SECRET: string;
 }
 
@@ -95,10 +96,10 @@ export default {
           return await handleCreateSession(request, env);
 
         case "session_action":
-          return await forwardToDO(env, route.sessionId!, `/${route.action!}`, request);
+          return await forwardToContainer(env, route.sessionId!, `/${route.action!}`, request);
 
         case "delete_session":
-          return await forwardToDO(env, route.sessionId!, "/close", request);
+          return await forwardToContainer(env, route.sessionId!, "/close", request);
 
         default:
           return errorResponse(`Unknown route: ${request.method} ${url.pathname}`, 404);
@@ -115,7 +116,7 @@ export default {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/** Create a new DO instance and launch the browser. */
+/** Create a new container instance and launch the browser. */
 async function handleCreateSession(
   request: Request,
   env: Env,
@@ -123,18 +124,18 @@ async function handleCreateSession(
   const body = await request.json<{ url: string }>();
   if (!body.url) return errorResponse("Missing 'url' in request body", 400);
 
-  // Create a unique DO ID for this session
-  const doId = env.LOGIN_SESSIONS.newUniqueId();
-  const stub = env.LOGIN_SESSIONS.get(doId);
+  // Each session gets its own container instance (unique ID)
+  const sessionId = crypto.randomUUID();
+  const container = getContainer(env.LOGIN_SESSIONS, sessionId);
 
-  // Forward the launch request to the DO
-  const doRequest = new Request("https://do/launch", {
+  // Forward the launch request to the container
+  const launchRequest = new Request("https://container/launch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url: body.url }),
   });
 
-  const response = await stub.fetch(doRequest);
+  const response = await container.fetch(launchRequest);
 
   if (!response.ok) {
     const data = await response.json<{ error?: string }>();
@@ -144,35 +145,27 @@ async function handleCreateSession(
     );
   }
 
-  // Return the DO ID as the session ID
   return jsonResponse({
-    sessionId: doId.toString(),
-    liveViewUrl: null, // CF doesn't have embeddable live view
+    sessionId,
+    liveViewUrl: null, // Containers don't have embeddable live view
   });
 }
 
-/** Forward a request to an existing DO by session ID. */
-async function forwardToDO(
+/** Forward a request to an existing container by session ID. */
+async function forwardToContainer(
   env: Env,
   sessionId: string,
   path: string,
   originalRequest: Request,
 ): Promise<Response> {
-  let doId: DurableObjectId;
-  try {
-    doId = env.LOGIN_SESSIONS.idFromString(sessionId);
-  } catch {
-    return errorResponse(`Invalid session ID: ${sessionId}`, 400);
-  }
-
-  const stub = env.LOGIN_SESSIONS.get(doId);
+  const container = getContainer(env.LOGIN_SESSIONS, sessionId);
 
   // Build the forwarded request
-  const doRequest = new Request(`https://do${path}`, {
+  const containerRequest = new Request(`https://container${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: originalRequest.body,
   });
 
-  return stub.fetch(doRequest);
+  return container.fetch(containerRequest);
 }
