@@ -25,6 +25,8 @@ import {
   fillAndSubmit,
   clickElement,
   waitForPageContent,
+  navigateTo,
+  validateLocator,
 } from "./browser";
 
 // ---------------------------------------------------------------------------
@@ -53,29 +55,7 @@ function getScreenLocators(screen: LoginState): string[] {
   return locators;
 }
 
-/** Check whether a Playwright locator resolves to at least one element. */
-async function validateLocator(
-  session: BrowserSession,
-  locator: string,
-): Promise<boolean> {
-  const page = session.page;
-
-  try {
-    if ((await page.locator(locator).first().count()) > 0) return true;
-  } catch {
-    // Fall through to iframes
-  }
-
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    try {
-      if ((await frame.locator(locator).first().count()) > 0) return true;
-    } catch {
-      // Next frame
-    }
-  }
-  return false;
-}
+// validateLocator is now imported from browser.ts (provider-aware)
 
 // ---------------------------------------------------------------------------
 // analyzeLoginPage — the core observation step
@@ -93,7 +73,7 @@ async function validateLocator(
 export async function analyzeLoginPage(
   session: BrowserSession,
 ): Promise<{ screen: LoginState; screenshot: string }> {
-  const { html, screenshot, url } = await getPageContext(session.page);
+  const { html, screenshot, url } = await getPageContext(session);
 
   const errorHistory: Array<{ error: string }> = [];
 
@@ -213,11 +193,7 @@ export async function handleScreen(
           value: userInput[input.name],
         }));
 
-      await fillAndSubmit(
-        session.page,
-        inputs,
-        screen.submit.playwrightLocator,
-      );
+      await fillAndSubmit(session, inputs, screen.submit.playwrightLocator);
 
       // Return null — route handler will analyze via SSE
       return {
@@ -250,11 +226,11 @@ export async function handleScreen(
         };
       }
 
-      await clickElement(session.page, option.optionPlaywrightLocator);
+      await clickElement(session, option.optionPlaywrightLocator);
 
       // If there's a separate submit button, click it after selecting
       if (screen.submit) {
-        await clickElement(session.page, screen.submit.playwrightLocator);
+        await clickElement(session, screen.submit.playwrightLocator);
       }
 
       // Return null — route handler will analyze via SSE
@@ -275,8 +251,7 @@ export async function handleScreen(
         };
       }
 
-      await session.page.goto(userInput.url, { waitUntil: "domcontentloaded" });
-      await session.page.waitForLoadState("load").catch(() => {});
+      await navigateTo(session, userInput.url);
 
       // Return null — route handler will analyze via SSE
       return {
@@ -295,7 +270,7 @@ export async function handleScreen(
           message: { type: "error", message: "No dismiss locator found" },
         };
       }
-      await clickElement(session.page, screen.dismissPlaywrightLocator);
+      await clickElement(session, screen.dismissPlaywrightLocator);
       const { screen: nextScreen } = await analyzeLoginPage(session);
       return {
         nextScreen,
@@ -307,7 +282,7 @@ export async function handleScreen(
     // loading_screen — wait and re-analyze
     // ------------------------------------------------------------------
     case "loading_screen": {
-      await waitForPageContent(session.page);
+      await waitForPageContent(session);
       const { screen: nextScreen } = await analyzeLoginPage(session);
       return {
         nextScreen,

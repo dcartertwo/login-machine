@@ -46,20 +46,56 @@ At <a href="https://anon.com">Anon</a> the Login Machine replaced hundreds of pe
 
 ```bash
 cp .env.example .env.local
-# Fill in your API keys
+# Fill in your API keys (see provider options below)
 npm install
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and paste a login URL, or try the [hosted demo](https://login-machine.vercel.app/).
 
-### Environment Variables
+### Browser Providers
+
+The Login Machine supports two browser providers, selected via the `BROWSER_PROVIDER` environment variable.
+
+#### Option A: BrowserBase (default)
+
+Cloud-hosted browsers with a live iframe preview.
 
 | Variable | Description |
 |---|---|
 | `ANTHROPIC_API_KEY` | [Anthropic](https://console.anthropic.com/) API key for Claude |
 | `BROWSERBASE_API_KEY` | [BrowserBase](https://www.browserbase.com/) API key |
 | `BROWSERBASE_PROJECT_ID` | [BrowserBase](https://www.browserbase.com/) project ID |
+
+```env
+BROWSER_PROVIDER=browserbase
+```
+
+#### Option B: Cloudflare Browser Rendering
+
+Self-hosted browsers via Cloudflare Workers + Durable Objects. No third-party dependency. Screenshot preview replaces the live iframe.
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | [Anthropic](https://console.anthropic.com/) API key for Claude |
+| `CF_BROWSER_WORKER_URL` | URL of the deployed Worker (e.g. `https://login-browser.you.workers.dev`) |
+| `CF_BROWSER_API_KEY` | Shared secret matching `AUTH_SECRET` in the Worker |
+
+```env
+BROWSER_PROVIDER=cloudflare
+```
+
+**Setup**: See [`worker/README.md`](worker/README.md) for Worker deployment instructions.
+
+**Local development** requires running both the Next.js app and the Worker simultaneously:
+
+```bash
+# Terminal 1: Worker
+cd worker && npx wrangler dev
+
+# Terminal 2: Next.js
+npm run dev
+```
 
 ## How It Works
 
@@ -114,9 +150,21 @@ src/
 ├── hooks/use-login-session.ts       # State management + SSE streaming
 └── lib/ai-login/
     ├── agent.ts                     # LLM analysis + screen handlers
-    ├── browser.ts                   # BrowserBase + Playwright (stateless)
+    ├── browser.ts                   # Provider factory (routes to browserbase or cloudflare)
+    ├── providers/
+    │   ├── browserbase.ts           # BrowserBase provider (original implementation)
+    │   └── cloudflare.ts            # Cloudflare Browser Rendering provider (HTTP client)
+    ├── page-extract.ts              # Shared DOM walker (extractBodyHTML)
     ├── prompts.ts                   # System prompt for classification
     └── types.ts                     # Zod schemas for all screen types
+
+worker/                              # Cloudflare Worker (only needed for CF provider)
+├── src/
+│   ├── index.ts                     # Worker fetch handler + routing
+│   ├── login-browser-do.ts          # Durable Object — holds browser session
+│   └── auth.ts                      # Bearer token auth middleware
+├── wrangler.jsonc                   # Worker config (browser binding + DO)
+└── package.json
 ```
 
 ### Stack
@@ -125,7 +173,8 @@ src/
 |---|---|
 | Frontend | Next.js 16, React 19, Tailwind 4 |
 | LLM | Claude Sonnet 4.5 via [Vercel AI SDK](https://sdk.vercel.ai/) |
-| Browser | Playwright over CDP via [BrowserBase](https://www.browserbase.com/) |
+| Browser (Option A) | Playwright over CDP via [BrowserBase](https://www.browserbase.com/) |
+| Browser (Option B) | [@cloudflare/playwright](https://developers.cloudflare.com/browser-rendering/) via Durable Object |
 | Validation | Zod schemas + live DOM locator checks |
 
 ## License
