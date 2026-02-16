@@ -1,368 +1,167 @@
 /**
- * Browser automation layer — BrowserBase only.
+ * Browser automation — provider-aware public API.
  *
- * Stateless design for serverless: every request connects to BrowserBase via
- * CDP, does its work, and the connection closes with the function. BrowserBase
- * keeps the actual browser alive server-side.
+ * Routes to BrowserBase or Cloudflare Browser Rendering based on the
+ * BROWSER_PROVIDER environment variable. Default is "browserbase" for
+ * backward compatibility.
  *
- * Credentials never pass through this module's logs; values are written
- * directly to the DOM.
+ * All consumers (agent.ts, route.ts) import from this file and are
+ * unaware of which provider is active.
  */
 
-import {
-  chromium,
-  type Browser,
-  type Page,
-  type BrowserContext,
-} from "playwright";
+import * as browserbase from "./providers/browserbase";
+import * as cloudflare from "./providers/cloudflare";
 
 // ---------------------------------------------------------------------------
-// Types
+// Provider selection
 // ---------------------------------------------------------------------------
 
-export interface BrowserSession {
-  sessionId: string;
-  page: Page;
-  browser: Browser;
-  context: BrowserContext;
-  liveViewUrl: string;
-}
+type Provider = "browserbase" | "cloudflare";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function getApiKey(): string {
-  const apiKey = process.env.BROWSERBASE_API_KEY;
-  if (!apiKey) throw new Error("BROWSERBASE_API_KEY must be set");
-  return apiKey;
-}
-
-/** Connect Playwright to an existing BrowserBase session over CDP. */
-async function connectToSession(
-  bbSessionId: string,
-): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
-  const apiKey = getApiKey();
-  const wsEndpoint = `wss://connect.browserbase.com?apiKey=${apiKey}&sessionId=${bbSessionId}`;
-  const browser = await chromium.connectOverCDP(wsEndpoint);
-  const context = browser.contexts()[0];
-  const page = context.pages()[0] || (await context.newPage());
-  page.setDefaultTimeout(15000);
-  return { browser, context, page };
-}
-
-/** Fetch the embeddable live-view URL for a BrowserBase session. */
-async function fetchLiveViewUrl(bbSessionId: string): Promise<string> {
-  const apiKey = getApiKey();
-  const fallback = `https://www.browserbase.com/sessions/${bbSessionId}`;
-  try {
-    const res = await fetch(
-      `https://api.browserbase.com/v1/sessions/${bbSessionId}/debug`,
-      { headers: { "x-bb-api-key": apiKey } },
+function getProvider(): Provider {
+  const provider = process.env.BROWSER_PROVIDER || "browserbase";
+  if (provider !== "browserbase" && provider !== "cloudflare") {
+    throw new Error(
+      `Invalid BROWSER_PROVIDER: "${provider}". Must be "browserbase" or "cloudflare".`,
     );
-    if (!res.ok) return fallback;
-    const data = await res.json();
-    return data.debuggerFullscreenUrl || fallback;
-  } catch {
-    return fallback;
   }
+  return provider;
 }
+
+// ---------------------------------------------------------------------------
+// Unified BrowserSession type
+// ---------------------------------------------------------------------------
+
+/**
+ * Unified BrowserSession that works with both providers.
+ *
+ * For BrowserBase: page, browser, context are real Playwright objects.
+ * For Cloudflare: page, browser, context are null (operations go via HTTP).
+ */
+export type BrowserSession =
+  | browserbase.BrowserSession
+  | cloudflare.BrowserSession;
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
 
-/** Create a new BrowserBase cloud browser session. */
 export async function createSession(): Promise<BrowserSession> {
-  const apiKey = getApiKey();
-  const projectId = process.env.BROWSERBASE_PROJECT_ID;
-  if (!projectId) throw new Error("BROWSERBASE_PROJECT_ID must be set");
-
-  const res = await fetch("https://api.browserbase.com/v1/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-bb-api-key": apiKey },
-    body: JSON.stringify({
-      projectId,
-      browserSettings: { viewport: { width: 1280, height: 800 } },
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `BrowserBase session creation failed: ${res.statusText}${body ? ` — ${body}` : ""}`,
-    );
-  }
-
-  const data = await res.json();
-  const bbSessionId: string = data.id;
-
-  const { browser, context, page } = await connectToSession(bbSessionId);
-  const liveViewUrl = await fetchLiveViewUrl(bbSessionId);
-
-  return { sessionId: bbSessionId, page, browser, context, liveViewUrl };
+  return getProvider() === "cloudflare"
+    ? cloudflare.createSession()
+    : browserbase.createSession();
 }
 
-/** Reconnect to an existing BrowserBase session by ID. */
-export async function getSession(bbSessionId: string): Promise<BrowserSession> {
-  const { browser, context, page } = await connectToSession(bbSessionId);
-  const liveViewUrl = await fetchLiveViewUrl(bbSessionId);
-  return { sessionId: bbSessionId, page, browser, context, liveViewUrl };
+export async function getSession(sessionId: string): Promise<BrowserSession> {
+  return getProvider() === "cloudflare"
+    ? cloudflare.getSession(sessionId)
+    : browserbase.getSession(sessionId);
 }
 
-/** Disconnect Playwright from the session (BrowserBase keeps the browser alive). */
-export async function closeSession(bbSessionId: string): Promise<void> {
-  try {
-    const { browser } = await connectToSession(bbSessionId);
-    await browser.close();
-  } catch {
-    // Session may already be closed
-  }
+export async function closeSession(sessionId: string): Promise<void> {
+  return getProvider() === "cloudflare"
+    ? cloudflare.closeSession(sessionId)
+    : browserbase.closeSession(sessionId);
 }
 
 // ---------------------------------------------------------------------------
 // Page context extraction
 // ---------------------------------------------------------------------------
 
-/**
- * Build the minimal context the LLM needs: stripped HTML + a JPEG screenshot.
- *
- * The HTML extractor walks the DOM recursively and keeps only attributes
- * useful for locator generation. Shadow DOM boundaries are traversed so
- * enterprise SSO widgets aren't missed.
- */
 export async function getPageContext(
-  page: Page,
-  attempt = 0,
+  session: BrowserSession,
 ): Promise<{ html: string; screenshot: string; url: string }> {
-  try {
-    await page.waitForLoadState("domcontentloaded", { timeout: 10000 });
-  } catch {
-    // Page might still be usable even if the full load times out
-  }
-
-  try {
-    const extractBodyHTML = () => {
-      function extractHTML(node: Node): string {
-        if (node.nodeType === 3) return node.textContent?.trim() || "";
-        if (node.nodeType !== 1) return "";
-
-        const el = node as Element;
-        const styles = window.getComputedStyle(el);
-        if (styles.display === "none" || styles.visibility === "hidden")
-          return "";
-
-        const exclude = ["SCRIPT", "STYLE", "svg", "IMG", "NOSCRIPT", "LINK"];
-        if (exclude.includes(el.tagName)) return "";
-
-        const root = el.shadowRoot || el;
-        let html = `<${el.tagName.toLowerCase()}`;
-
-        for (const attr of el.attributes) {
-          if (
-            [
-              "id",
-              "class",
-              "type",
-              "name",
-              "placeholder",
-              "role",
-              "aria-label",
-            ].includes(attr.name)
-          ) {
-            html += ` ${attr.name}="${attr.value}"`;
-          }
-        }
-        html += ">";
-
-        for (const child of root.childNodes) {
-          if (child instanceof HTMLSlotElement) {
-            const assigned = child.assignedNodes()[0];
-            html += assigned ? extractHTML(assigned) : child.innerHTML;
-          } else {
-            html += extractHTML(child);
-          }
-        }
-
-        html += `</${el.tagName.toLowerCase()}>`;
-        return html;
-      }
-      return extractHTML(document.body);
-    };
-
-    let bodyHtml = await page.evaluate(extractBodyHTML);
-
-    // Extract iframe content separately
-    for (const frame of page.frames()) {
-      if (frame !== page.mainFrame()) {
-        try {
-          const iframeHtml = await frame.evaluate(extractBodyHTML);
-          bodyHtml += `<iframe-content>${iframeHtml}</iframe-content>`;
-        } catch {
-          // Cross-origin frames can't be read
-        }
-      }
-    }
-
-    const buf = await page.screenshot({
-      type: "jpeg",
-      quality: 80,
-      fullPage: false,
-      timeout: 30000,
-      animations: "disabled",
-    });
-
-    return {
-      html: bodyHtml.substring(0, 100_000),
-      screenshot: buf.toString("base64"),
-      url: page.url(),
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("Execution context was destroyed") && attempt < 2) {
-      console.warn(
-        `[browser] Navigation detected, retrying (attempt ${attempt + 1})...`,
-      );
-      await page.waitForTimeout(2000);
-      return getPageContext(page, attempt + 1);
-    }
-    throw err;
-  }
+  return getProvider() === "cloudflare"
+    ? cloudflare.getPageContext(session as cloudflare.BrowserSession)
+    : browserbase.getPageContext(session as browserbase.BrowserSession);
 }
 
 // ---------------------------------------------------------------------------
-// Wait for meaningful page content (used after form submissions)
+// Wait for meaningful page content
 // ---------------------------------------------------------------------------
 
-/**
- * Wait for the SPA to render meaningful content. Many login pages use
- * client-side rendering where the initial HTML is just an empty shell.
- */
-export async function waitForPageContent(page: Page): Promise<void> {
-  await page.waitForLoadState("load").catch(() => {});
-
-  try {
-    await page.waitForFunction(
-      () => {
-        const body = document.body;
-        if (!body) return false;
-        return (
-          body.querySelectorAll("input, button, a[href]").length >= 2 ||
-          (body.innerText || "").trim().length > 100
-        );
-      },
-      { timeout: 15000 },
-    );
-  } catch {
-    // Timeout is fine — re-analyze with whatever we have
-  }
-
-  await page.waitForTimeout(2000);
+export async function waitForPageContent(
+  session: BrowserSession,
+): Promise<void> {
+  return getProvider() === "cloudflare"
+    ? cloudflare.waitForPageContent(session as cloudflare.BrowserSession)
+    : browserbase.waitForPageContent(session as browserbase.BrowserSession);
 }
 
 // ---------------------------------------------------------------------------
-// Form interaction helpers
+// Navigation
 // ---------------------------------------------------------------------------
 
-/**
- * Fill every field and click submit. Credential values are written directly
- * to the DOM — they never appear in logs or LLM context.
- */
+export async function navigateTo(
+  session: BrowserSession,
+  url: string,
+): Promise<void> {
+  return getProvider() === "cloudflare"
+    ? cloudflare.navigateTo(session as cloudflare.BrowserSession, url)
+    : browserbase.navigateTo(session as browserbase.BrowserSession, url);
+}
+
+// ---------------------------------------------------------------------------
+// Form interaction
+// ---------------------------------------------------------------------------
+
 export async function fillAndSubmit(
-  page: Page,
+  session: BrowserSession,
   inputs: Array<{ locator: string; value: string }>,
   submitLocator: string,
 ): Promise<void> {
-  for (const { locator, value } of inputs) {
-    const filled = await fillInPageOrFrame(page, locator, value);
-    if (!filled) {
-      console.warn(`[browser] Could not find element for locator: ${locator}`);
-    }
+  return getProvider() === "cloudflare"
+    ? cloudflare.fillAndSubmit(session as cloudflare.BrowserSession, inputs, submitLocator)
+    : browserbase.fillAndSubmit(session as browserbase.BrowserSession, inputs, submitLocator);
+}
+
+export async function clickElement(
+  session: BrowserSession,
+  locator: string,
+): Promise<void> {
+  return getProvider() === "cloudflare"
+    ? cloudflare.clickElement(session as cloudflare.BrowserSession, locator)
+    : browserbase.clickElement(session as browserbase.BrowserSession, locator);
+}
+
+// ---------------------------------------------------------------------------
+// Locator validation (provider-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate whether a locator exists in the live DOM.
+ *
+ * BrowserBase: uses local Playwright page object.
+ * Cloudflare: calls the DO's /validate-locators endpoint.
+ */
+export async function validateLocator(
+  session: BrowserSession,
+  locator: string,
+): Promise<boolean> {
+  if (getProvider() === "cloudflare") {
+    const results = await cloudflare.validateLocators(
+      session as cloudflare.BrowserSession,
+      [locator],
+    );
+    return results[0]?.exists ?? false;
   }
 
-  await clickInPageOrFrame(page, submitLocator);
-
-  // Wait for navigation / redirects
-  await page.waitForLoadState("load").catch(() => {});
-  await page.waitForTimeout(3000);
+  // BrowserBase: local Playwright validation
+  const bbSession = session as browserbase.BrowserSession;
+  const page = bbSession.page;
 
   try {
-    await page.waitForLoadState("domcontentloaded", { timeout: 5000 });
+    if ((await page.locator(locator).first().count()) > 0) return true;
   } catch {
-    // Page may already be stable
-  }
-}
-
-/** Click an element, searching across frames if needed. */
-export async function clickElement(page: Page, locator: string): Promise<void> {
-  await clickInPageOrFrame(page, locator);
-  await page.waitForLoadState("load").catch(() => {});
-  await page.waitForTimeout(1500);
-}
-
-// ---------------------------------------------------------------------------
-// Frame-aware helpers
-// ---------------------------------------------------------------------------
-
-async function fillInPageOrFrame(
-  page: Page,
-  locator: string,
-  value: string,
-): Promise<boolean> {
-  try {
-    const el = page.locator(locator).first();
-    if ((await el.count()) > 0) {
-      await el.waitFor({ state: "attached", timeout: 5000 });
-      await el.focus();
-      await el.clear();
-      await el.fill(value);
-      return true;
-    }
-  } catch (e) {
-    console.warn(`[browser] Main frame fill failed for ${locator}:`, e);
+    // Fall through to iframes
   }
 
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     try {
-      const el = frame.locator(locator).first();
-      if ((await el.count()) > 0) {
-        await el.focus();
-        await el.clear();
-        await el.fill(value);
-        return true;
-      }
+      if ((await frame.locator(locator).first().count()) > 0) return true;
     } catch {
-      // Try next frame
-    }
-  }
-  return false;
-}
-
-async function clickInPageOrFrame(
-  page: Page,
-  locator: string,
-): Promise<boolean> {
-  try {
-    const el = page.locator(locator).first();
-    if ((await el.count()) > 0) {
-      await el.click();
-      return true;
-    }
-  } catch (e) {
-    console.warn(`[browser] Main frame click failed for ${locator}:`, e);
-  }
-
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    try {
-      const el = frame.locator(locator).first();
-      if ((await el.count()) > 0) {
-        await el.click();
-        return true;
-      }
-    } catch {
-      // Try next frame
+      // Next frame
     }
   }
   return false;

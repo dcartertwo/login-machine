@@ -1,0 +1,23 @@
+{
+  "name": "login-machine-browser",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "browser": {
+    "binding": "MYBROWSER"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LOGIN_SESSIONS",
+        "class_name": "LoginBrowserDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LoginBrowserDO"]
+    }
+  ]
+}

@@ -40,6 +40,7 @@ export function Chat() {
     messages,
     sessionId,
     liveViewUrl,
+    screenshot,
     busy,
     logs,
     formStatuses,
@@ -140,7 +141,7 @@ export function Chat() {
       <div className="flex-1 flex min-h-0">
         {/* Left column — Browser + Logs */}
         <div className="w-[55%] flex flex-col border-r border-white/[0.1]">
-          <BrowserPreview liveViewUrl={liveViewUrl} busy={busy} />
+          <BrowserPreview liveViewUrl={liveViewUrl} screenshot={screenshot} busy={busy} />
           <LogPanel logs={logs} />
         </div>
 
@@ -204,16 +205,20 @@ export function Chat() {
 }
 
 // ---------------------------------------------------------------------------
-// BrowserPreview — shows the live BrowserBase iframe or a placeholder
+// BrowserPreview — shows the live BrowserBase iframe, a screenshot fallback
+// (Cloudflare provider), or a placeholder.
 // ---------------------------------------------------------------------------
 
 function BrowserPreview({
   liveViewUrl,
+  screenshot,
   busy,
 }: {
   liveViewUrl: string | null;
+  screenshot: string | null;
   busy: boolean;
 }) {
+  // BrowserBase: live iframe
   if (liveViewUrl) {
     return (
       <div className="h-[55%] min-h-0 bg-black/40 relative">
@@ -226,6 +231,27 @@ function BrowserPreview({
     );
   }
 
+  // Cloudflare: screenshot preview (updated after each action)
+  if (screenshot) {
+    return (
+      <div className="h-[55%] min-h-0 bg-black/40 relative">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={`data:image/png;base64,${screenshot}`}
+          alt="Browser screenshot"
+          className="absolute inset-0 w-full h-full object-contain"
+        />
+        {busy && (
+          <div className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-md bg-black/60 px-2.5 py-1">
+            <Loader2 className="size-3 text-white/70 animate-spin" />
+            <span className="text-white/70 text-[11px]">Working…</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // No session yet: placeholder
   return (
     <div className="h-[55%] min-h-0 bg-black/40 flex flex-col items-center justify-center gap-3">
       {busy ? (

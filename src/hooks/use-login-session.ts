@@ -59,6 +59,10 @@ const WELCOME: ChatMessage = {
 
 const MAX_LOADING_RETRIES = 12;
 
+/** Detect session-expired errors from the Cloudflare provider. */
+const isSessionExpired = (msg: string) =>
+  msg.includes("Browser session expired") || msg.includes("session expired");
+
 /** Parse an SSE stream into discrete events. */
 async function readSSE(
   response: Response,
@@ -106,6 +110,7 @@ export function useLoginSession() {
   const [formStatuses, setFormStatuses] = useState<Record<string, FormStatus>>(
     {},
   );
+  const [screenshot, setScreenshot] = useState<string | null>(null);
 
   const currentFormId = useRef<string | null>(null);
   const loadingRetries = useRef(0);
@@ -277,6 +282,9 @@ export function useLoginSession() {
         if (data.message?.type === "action") {
           log("action", data.message.action);
         }
+        if (data.screenshot) {
+          setScreenshot(data.screenshot);
+        }
         if (data.screen) {
           log("thought", `Screen classified: ${data.screen.type}`);
           processScreenRef.current?.(data.screen, sid);
@@ -284,8 +292,11 @@ export function useLoginSession() {
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
         const msg = e instanceof Error ? e.message : "Unknown error";
-        replaceLastLoading({ role: "assistant", type: "error", text: msg });
-        log("error", msg);
+        const text = isSessionExpired(msg)
+          ? "Browser session expired. Please click Reset and try again."
+          : msg;
+        replaceLastLoading({ role: "assistant", type: "error", text });
+        log("error", text);
         setBusy(false);
       }
     },
@@ -345,8 +356,11 @@ export function useLoginSession() {
         if (!res.ok) throw new Error(data.error || "Failed to start session");
 
         setSessionId(data.sessionId);
-        setLiveViewUrl(data.liveViewUrl);
-        log("action", "Browser launched — live view ready");
+        setLiveViewUrl(data.liveViewUrl ?? null);
+        if (data.screenshot) {
+          setScreenshot(data.screenshot);
+        }
+        log("action", "Browser launched — analyzing page...");
 
         posthog.capture("session_started", {
           url: normalised,
@@ -425,6 +439,10 @@ export function useLoginSession() {
               const resultScreen = payload.screen as LoginState;
               log("thought", `Screen classified: ${resultScreen.type}`);
 
+              if (payload.screenshot) {
+                setScreenshot(payload.screenshot as string);
+              }
+
               posthog.capture("user_input_submitted", {
                 session_id: sessionId,
                 screen_type: currentScreen.type,
@@ -443,15 +461,18 @@ export function useLoginSession() {
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
         const msg = e instanceof Error ? e.message : "Unknown error";
-        replaceLastLoading({ role: "assistant", type: "error", text: msg });
-        log("error", msg);
+        const text = isSessionExpired(msg)
+          ? "Browser session expired. Please click Reset and try again."
+          : msg;
+        replaceLastLoading({ role: "assistant", type: "error", text });
+        log("error", text);
 
         posthog.capture("user_input_submitted", {
           session_id: sessionId,
           screen_type: currentScreen.type,
           target_domain: targetDomainRef.current,
           success: false,
-          error_message: msg,
+          error_message: text,
         });
 
         setBusy(false);
@@ -478,6 +499,7 @@ export function useLoginSession() {
 
     setSessionId(null);
     setLiveViewUrl(null);
+    setScreenshot(null);
     setCurrentScreen(null);
     setBusy(false);
     setLogs([]);
@@ -493,6 +515,7 @@ export function useLoginSession() {
     messages,
     sessionId,
     liveViewUrl,
+    screenshot,
     busy,
     logs,
     formStatuses,

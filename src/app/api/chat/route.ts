@@ -17,6 +17,7 @@ import {
   closeSession,
   getPageContext,
   waitForPageContent,
+  navigateTo,
 } from "@/lib/ai-login/browser";
 import { analyzeLoginPage, handleScreen } from "@/lib/ai-login/agent";
 import { LoginStateSchema } from "@/lib/ai-login/types";
@@ -121,12 +122,7 @@ export async function POST(request: NextRequest) {
       const session = await createSession();
 
       // Kick off navigation in the background
-      session.page
-        .goto(parsed.data.url, {
-          waitUntil: "domcontentloaded",
-          timeout: 30000,
-        })
-        .catch(() => {});
+      navigateTo(session, parsed.data.url).catch(() => {});
 
       return ok({
         sessionId: session.sessionId,
@@ -165,7 +161,7 @@ export async function POST(request: NextRequest) {
           });
 
           // 2. Wait for page content to settle, then analyze
-          await waitForPageContent(session.page);
+          await waitForPageContent(session);
           const { screen: analyzed, screenshot } =
             await analyzeLoginPage(session);
 
@@ -179,7 +175,7 @@ export async function POST(request: NextRequest) {
         screen,
         values,
       );
-      const { screenshot } = await getPageContext(session.page);
+      const { screenshot } = await getPageContext(session);
       return ok({ screen: nextScreen, screenshot, message });
     }
 

@@ -2,6 +2,10 @@
 
 # dependencies
 /node_modules
+/worker/node_modules
+/worker/dist
+/worker/.wrangler
+/worker/.dev.vars
 /.pnp
 .pnp.*
 .yarn/*
